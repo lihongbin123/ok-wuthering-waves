@@ -1,4 +1,4 @@
-"""KL 自建更新器：只依赖 git + app.json，不经过 PyAppify launcher。
+"""KL 自建更新器：只依赖 app.json + HTTPS，不经过 PyAppify launcher。
 
 版本规则：远端 tag 必须是四段纯数字 ``v<上游三段>.<构建序号>``，例如
 ``v3.8.15.1``。``git ls-remote --tags`` 取最大值，与 ``current_version``
@@ -11,14 +11,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import shutil
-import subprocess
 import tarfile
 import tempfile
 import threading
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -51,17 +52,37 @@ def app_json_path() -> Path:
     return working_dir().parent / "app.json"
 
 
-def _git(args: list[str], cwd: Path | None = None, timeout: int = 180) -> str:
-    cmd = ["git"]
-    proxy = os.environ.get("KL_GIT_PROXY")
-    if proxy:
-        cmd += ["-c", f"http.proxy={proxy}", "-c", f"https.proxy={proxy}"]
-    p = subprocess.run(cmd + args, cwd=str(cwd) if cwd else None,
-                       capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", timeout=timeout)
-    if p.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {p.stderr.strip()[:500]}")
-    return p.stdout
+def _repo_parts(url: str) -> tuple[str, str]:
+    match = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", url.strip())
+    if not match:
+        raise RuntimeError(f"只支持 GitHub 仓库地址：{url}")
+    return match.group(1), match.group(2)
+
+
+def _open(url: str, timeout: int = 60):
+    proxy = os.environ.get("KL_HTTP_PROXY") or os.environ.get("HTTPS_PROXY")
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
+    opener = urllib.request.build_opener(*handlers)
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "kl-updater",
+        "Accept": "application/vnd.github+json",
+    })
+    return opener.open(request, timeout=timeout)
+
+
+def _api_tags(url: str) -> list[str]:
+    owner, repo = _repo_parts(url)
+    tags: list[str] = []
+    for page in range(1, 6):
+        api = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
+        with _open(api) as response:
+            batch = json.loads(response.read().decode("utf-8"))
+        if not batch:
+            break
+        tags.extend(item.get("name", "") for item in batch)
+        if len(batch) < 100:
+            break
+    return tags
 
 
 def read_app_json() -> dict:
@@ -93,15 +114,8 @@ def current_version(app: dict) -> tuple[int, int, int, int]:
 
 
 def list_tags(url: str) -> list[str]:
-    out = _git(["ls-remote", "--tags", url], timeout=60)
-    tags = []
-    for line in out.splitlines():
-        ref = line.split("\t", 1)[-1].strip()
-        if ref.startswith("refs/tags/") and not ref.endswith("^{}"):
-            tag = ref[len("refs/tags/"):]
-            if parse_tag(tag):
-                tags.append(tag)
-    return sorted(tags, key=parse_tag)
+    tags = [tag for tag in _api_tags(url) if parse_tag(tag)]
+    return sorted(set(tags), key=parse_tag)
 
 
 def check() -> tuple[str, str, bool]:
@@ -137,17 +151,24 @@ def _rollback(working: Path, backup_working: Path) -> None:
 
 
 def _extract_tag(url: str, tag: str, dest: Path) -> None:
-    repo = dest / ".repo"
+    owner, repo = _repo_parts(url)
     tree = dest / "tree"
     tree.mkdir(parents=True, exist_ok=True)
-    _git(["init", "--quiet", str(repo)])
-    _git(["fetch", "--no-tags", "--depth=1", url, f"refs/tags/{tag}:refs/tags/{tag}"], cwd=repo)
-    archive = dest / "tree.tar"
-    _git(["archive", "--format=tar", "--output", str(archive), tag], cwd=repo)
-    with tarfile.open(archive) as tar:
-        tar.extractall(tree, filter="data")
-    archive.unlink(missing_ok=True)
-    shutil.rmtree(repo, ignore_errors=True)
+    api = f"https://api.github.com/repos/{owner}/{repo}/tarball/{tag}"
+    with _open(api, timeout=180) as response:
+        payload = response.read()
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+        members = tar.getmembers()
+        roots = {m.name.split("/", 1)[0] for m in members if m.name}
+        if len(roots) != 1:
+            raise RuntimeError(f"压缩包结构异常，顶层条目：{sorted(roots)}")
+        root = roots.pop() + "/"
+        for member in members:
+            if not member.name.startswith(root):
+                continue
+            member.name = member.name[len(root):]
+            if member.name:
+                tar.extract(member, tree, filter="data")
 
 
 def update(tag: str) -> dict:
