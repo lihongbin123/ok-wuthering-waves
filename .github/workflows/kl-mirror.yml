@@ -1,0 +1,91 @@
+name: kl-mirror
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '指定上游 tag（如 v3.8.16）；留空则自动取最新'
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kl-mirror
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout fork master
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Pick upstream tag
+        id: pick
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ($tag) {
+            python pipeline/pick_tag.py --remote https://github.com/ok-oldking/ok-wuthering-waves.git --override $tag
+          } else {
+            python pipeline/pick_tag.py --remote https://github.com/ok-oldking/ok-wuthering-waves.git --built-remote "${{ github.server_url }}/${{ github.repository }}.git"
+          }
+
+      - name: Fetch upstream tag
+        if: steps.pick.outputs.tag != ''
+        shell: pwsh
+        run: |
+          git remote add upstream https://github.com/ok-oldking/ok-wuthering-waves.git
+          git fetch --depth=1 upstream "refs/tags/${{ steps.pick.outputs.tag }}:refs/tags/${{ steps.pick.outputs.tag }}"
+          git tag --list "${{ steps.pick.outputs.tag }}"
+
+      - name: Build KL tree
+        if: steps.pick.outputs.tag != ''
+        shell: pwsh
+        run: |
+          python pipeline/build_kl_mirror.py `
+            --repo . `
+            --tag "${{ steps.pick.outputs.tag }}" `
+            --overlay overlay `
+            --out build `
+            --report build-report.json
+
+      - name: Validate
+        if: steps.pick.outputs.tag != ''
+        shell: pwsh
+        run: |
+          python -m compileall -q build
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python pipeline/check_forbidden.py build
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Publish mirror branch and tag
+        if: steps.pick.outputs.tag != ''
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python pipeline/publish_mirror.py `
+            --tree build `
+            --branch kl-mirror `
+            --tag "${{ steps.pick.outputs.tag }}-kl.${{ github.run_number }}" `
+            --repo "${{ github.repository }}" `
+            --message "KL ${{ steps.pick.outputs.tag }} (build ${{ github.run_number }})"
+
+      - name: Upload build report
+        if: always() && steps.pick.outputs.tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: kl-build-report
+          path: build-report.json
+          if-no-files-found: ignore
