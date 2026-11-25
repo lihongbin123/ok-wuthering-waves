@@ -384,6 +384,10 @@ def main() -> int:
     brand = json.loads(Path(args.brand).read_text("utf-8"))
 
     extract(repo, args.tag, out)
+    if not (out / "ok" / "__init__.py").is_file():
+        raise RuntimeError(
+            f"{args.tag} 的树里没有 ok/ 框架包。这通常是取了 GitHub 源码仓库的 tag；"
+            "KL 构建必须用更新仓库 https://cnb.cool/ok-oldking/ok-ww-update2.git 的同名 tag。")
     stats = rewrite_upstream(out, brand)
     overlay_files = copy_overlay(out, overlay)
     write_runtime_brand(out, brand)

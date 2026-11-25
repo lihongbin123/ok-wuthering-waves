@@ -36,17 +36,17 @@ jobs:
         run: |
           $tag = "${{ github.event.inputs.tag }}"
           if ($tag) {
-            python pipeline/pick_tag.py --remote https://github.com/ok-oldking/ok-wuthering-waves.git --override $tag
+            python pipeline/pick_tag.py --remote https://cnb.cool/ok-oldking/ok-ww-update2.git --override $tag
           } else {
-            python pipeline/pick_tag.py --remote https://github.com/ok-oldking/ok-wuthering-waves.git --built-remote "${{ github.server_url }}/${{ github.repository }}.git"
+            python pipeline/pick_tag.py --remote https://cnb.cool/ok-oldking/ok-ww-update2.git --built-remote "${{ github.server_url }}/${{ github.repository }}.git"
           }
 
       - name: Fetch upstream tag
         if: steps.pick.outputs.tag != ''
         shell: pwsh
         run: |
-          git remote add upstream https://github.com/ok-oldking/ok-wuthering-waves.git
-          git fetch --depth=1 upstream "refs/tags/${{ steps.pick.outputs.tag }}:refs/tags/${{ steps.pick.outputs.tag }}"
+          git remote add upstream https://cnb.cool/ok-oldking/ok-ww-update2.git
+          git fetch --no-tags --depth=1 upstream "refs/tags/${{ steps.pick.outputs.tag }}:refs/tags/${{ steps.pick.outputs.tag }}"
           git tag --list "${{ steps.pick.outputs.tag }}"
 
       - name: Build KL tree
