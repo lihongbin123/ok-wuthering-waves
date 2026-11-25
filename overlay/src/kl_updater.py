@@ -72,6 +72,16 @@ def _open(url: str, timeout: int = 60):
 
 def _api_tags(url: str) -> list[str]:
     owner, repo = _repo_parts(url)
+    # 优先用 git smart-http 的 refs 列表：不受 GitHub API 60 次/小时限制
+    info = f"https://github.com/{owner}/{repo}.git/info/refs?service=git-upload-pack"
+    try:
+        with _open(info) as response:
+            text = response.read().decode("utf-8", errors="replace")
+        names = re.findall(r"[0-9a-f]{40} refs/tags/([^\s^]+)", text)
+        if names:
+            return names
+    except Exception:  # noqa: BLE001
+        pass
     tags: list[str] = []
     for page in range(1, 6):
         api = f"https://api.github.com/repos/{owner}/{repo}/tags?per_page=100&page={page}"
@@ -154,7 +164,7 @@ def _extract_tag(url: str, tag: str, dest: Path) -> None:
     owner, repo = _repo_parts(url)
     tree = dest / "tree"
     tree.mkdir(parents=True, exist_ok=True)
-    api = f"https://api.github.com/repos/{owner}/{repo}/tarball/{tag}"
+    api = f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/tags/{tag}"
     with _open(api, timeout=180) as response:
         payload = response.read()
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
