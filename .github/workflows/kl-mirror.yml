@@ -78,9 +78,8 @@ jobs:
           python pipeline/publish_mirror.py `
             --tree build `
             --branch kl-mirror `
-            --tag "${{ steps.pick.outputs.tag }}-kl.${{ github.run_number }}" `
-            --repo "${{ github.repository }}" `
-            --message "KL ${{ steps.pick.outputs.tag }} (build ${{ github.run_number }})"
+            --base-tag "${{ steps.pick.outputs.tag }}" `
+            --repo "${{ github.repository }}"
 
       - name: Upload build report
         if: always() && steps.pick.outputs.tag != ''
