@@ -86,7 +86,7 @@ def _api_tags(url: str) -> list[str]:
 
 
 def read_app_json() -> dict:
-    with open(app_json_path(), "r", encoding="utf-8") as fh:
+    with open(app_json_path(), "r", encoding="utf-8-sig") as fh:
         return json.load(fh)
 
 
