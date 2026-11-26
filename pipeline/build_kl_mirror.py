@@ -159,6 +159,25 @@ def rewrite_upstream(out: Path, brand: dict) -> dict:
     return {"files_changed": files, "package_hits": pkg_hits}
 
 
+def rename_brand_files(out: Path, brand: dict) -> list[str]:
+    """改名带品牌词的文件（如 win32_gdi.py -> surface_gdi.py）。
+
+    rewrite_upstream 只改文件内容，不改文件名；内容里的 import 被改写成
+    surface_gdi 后，文件名若还是 win32_gdi.py，运行时会 ImportError。
+    """
+    tokens = [(str(a), str(b)) for a, b in brand.get("tokens", [])]
+    tokens.sort(key=lambda kv: -len(kv[0]))
+    renamed = []
+    for p in sorted([x for x in out.rglob("*") if x.is_file()], key=lambda x: len(x.parts), reverse=True):
+        name = p.name
+        for old, new in tokens:
+            name = name.replace(old, new)
+        if name != p.name and not (p.parent / name).exists():
+            p.rename(p.parent / name)
+            renamed.append(f"{p.relative_to(out)} -> {name}")
+    return renamed
+
+
 def copy_overlay(out: Path, overlay: Path) -> int:
     count = 0
     for p in overlay.rglob("*"):
@@ -390,6 +409,7 @@ def main() -> int:
             "KL 构建必须用更新仓库 https://cnb.cool/ok-oldking/ok-ww-update2.git 的同名 tag。")
     stats = rewrite_upstream(out, brand)
     overlay_files = copy_overlay(out, overlay)
+    renamed = rename_brand_files(out, brand)
     write_runtime_brand(out, brand)
     cfg_changes = patch_config(out)
     translator = patch_translator(out)
@@ -403,6 +423,7 @@ def main() -> int:
     report = {
         "tag": args.tag,
         "overlay_files": overlay_files,
+        "renamed_files": renamed,
         "rewrite": stats,
         "config_changes": cfg_changes,
         "translator_patched": translator,
