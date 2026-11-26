@@ -206,9 +206,7 @@ def update(tag: str) -> dict:
             raise RuntimeError("新版本的 config.py 不含 KL 品牌，tag 可能取错，已中止")
 
         for name in PRESERVE:
-            source = working / name
-            if source.exists():
-                _copy_tree(source, tree / name)
+            (tree / name).mkdir(exist_ok=True)
 
         # 保留 tag 树里没有的顶层用户数据
         for item in working.iterdir():
@@ -220,7 +218,7 @@ def update(tag: str) -> dict:
                 shutil.copy2(item, tree / item.name)
 
         _rollback(working, backup_working)
-        _copy_tree(tree, working, ignore=None)
+        _copy_tree(tree, working)
 
         app["current_version"] = tag
         versions = list(app.get("available_versions") or [])
