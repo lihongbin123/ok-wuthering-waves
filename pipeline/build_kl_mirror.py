@@ -396,7 +396,8 @@ def main() -> int:
     char_patched = patch_char_factory(out)
     i18n = compile_i18n(out)
     removed = sanitize(out)
-    (out / "main.py").write_text(MAIN_PY, "utf-8")
+    if not (out / "main.py").exists():
+        (out / "main.py").write_text(MAIN_PY, "utf-8")
     (out / "main_debug.py").write_text(MAIN_DEBUG_PY, "utf-8")
 
     report = {
