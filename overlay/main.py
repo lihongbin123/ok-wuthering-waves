@@ -9,6 +9,9 @@ if __name__ == '__main__':
     from config import config
     from kl import OK
     import src.kl_updater as kl_updater
+    import src.kl_update_compat as update_compat
+
+    update_compat.install()
 
     # 窗口标题等位置的版本号跟随 app.json 的 current_version
     try:
