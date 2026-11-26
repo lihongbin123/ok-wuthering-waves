@@ -21,6 +21,7 @@ TIMEOUT = float(os.environ.get("KL_APP_UPDATE_TIMEOUT", "8"))
 def install() -> None:
     import pyappify
     from pyappify import standalone
+    from src import kl_updater
 
     current = getattr(pyappify, "get_version_list", None)
     if current is None or getattr(current, "_kl_patched", False):
@@ -42,3 +43,18 @@ def install() -> None:
 
     get_version_list._kl_patched = True
     pyappify.get_version_list = get_version_list
+
+    original_update = getattr(pyappify, "update_to_version", None)
+    if original_update is not None and not getattr(original_update, "_kl_patched", False):
+
+        def update_to_version(version, timeout=300, exit_event=None, language=None):
+            """四段数字 tag 走 KL 自有更新器；其余立即失败，避免联网卡死。"""
+            tag = str(version)
+            if kl_updater.TAG_RE.match(tag):
+                return kl_updater.update(tag)
+            raise RuntimeError(
+                "KL 的应用内切换版本已停用（会去 GitHub 拉整包并卡住）。"
+                "请使用启动时的更新提示，或运行 src.kl_updater 升级。")
+
+        update_to_version._kl_patched = True
+        pyappify.update_to_version = update_to_version
