@@ -31,5 +31,13 @@ if __name__ == '__main__':
         pass
 
     ok = OK(config)
+
+    # 工坊角色代码每日自动同步：后台线程，失败不影响启动
+    try:
+        import src.workshop_autoupdate as workshop_autoupdate
+        workshop_autoupdate.start_backlound_sync()
+    except Exception:
+        pass
+
     kl_updater.start_background_check()
     ok.start()
