@@ -1,0 +1,43 @@
+if __name__ == '__main__':
+    # 去指纹层入口：必须在 import PySide6 / 读命令行之前执行
+    from pathlib import Path
+    import atexit
+    import json
+    import os
+
+    # 运行标记：更新器据此判断 KL 是否在运行（不依赖进程权限）
+    _pid_file = Path(__file__).resolve().parent / '.kl.pid'
+    try:
+        _pid_file.write_text(str(os.getpid()), encoding='utf-8')
+        atexit.register(lambda: _pid_file.unlink(missing_ok=True))
+    except OSError:
+        pass
+
+    import start_rebrand
+    start_rebrand.boot()
+
+    from config import config
+    from kl import OK
+    import src.kl_updater as kl_updater
+    import src.kl_update_compat as update_compat
+
+    update_compat.install()
+
+    # 窗口标题等位置的版本号跟随 app.json 的 current_version
+    try:
+        with open(Path(__file__).resolve().parent.parent / 'app.json', 'r', encoding='utf-8-sig') as fh:
+            config['version'] = json.load(fh).get('current_version') or config.get('version')
+    except Exception:
+        pass
+
+    ok = OK(config)
+
+    # 工坊角色代码每日自动同步：后台线程，失败不影响启动
+    try:
+        import src.workshop_autoupdate as workshop_autoupdate
+        workshop_autoupdate.start_backlound_sync()
+    except Exception:
+        pass
+
+    kl_updater.start_background_check()
+    ok.start()
