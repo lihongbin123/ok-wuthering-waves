@@ -1,0 +1,32 @@
+{
+  "product": "KL",
+  "product_upper": "KL",
+  "product_short": "kl",
+  "package": "kl",
+  "package_old": "ok",
+  "launcher_exe": "kl.exe",
+  "app_id": "com.kl.ww",
+  "gui_title": "KL",
+  "window_class_prefix": "Boreas",
+  "overlay_class": "Boreas.OverlaySurface",
+  "logger_name": "kl",
+  "log_name": "kl",
+  "config_folder": "configs",
+  "templates_folder": "kl_templates",
+  "tasks_folder": "kl_tasks",
+  "screenshots_folder": "captures",
+  "temp_prefix": "kl",
+  "mutex_channel": "kl-session-v1",
+  "ipc_prefix": "kl-ipc",
+  "env_prefix": "KL",
+  "decoder_name": "sigma",
+  "decoder_variant": 4,
+  "seed": "4c9e7a10f3b28d65",
+  "urls": {
+    "update_china": "https://git.kl.invalid/upd/main.git",
+    "update_global": "https://git.kl.invalid/upd-global/main.git",
+    "website": "https://kl.invalid/launcher",
+    "home": "https://kl.invalid",
+    "repo": "https://git.kl.invalid/src/app"
+  }
+}
