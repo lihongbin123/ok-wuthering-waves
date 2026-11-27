@@ -1,7 +1,17 @@
 if __name__ == '__main__':
     # 去指纹层入口：必须在 import PySide6 / 读命令行之前执行
     from pathlib import Path
+    import atexit
     import json
+    import os
+
+    # 运行标记：更新器据此判断 KL 是否在运行（不依赖进程权限）
+    _pid_file = Path(__file__).resolve().parent / '.kl.pid'
+    try:
+        _pid_file.write_text(str(os.getpid()), encoding='utf-8')
+        atexit.register(lambda: _pid_file.unlink(missing_ok=True))
+    except OSError:
+        pass
 
     import start_rebrand
     start_rebrand.boot()

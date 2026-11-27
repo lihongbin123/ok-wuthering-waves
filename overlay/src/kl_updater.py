@@ -4,11 +4,9 @@
 ``v3.8.15.1``。``git ls-remote --tags`` 取最大值，与 ``current_version``
 按元组比较；联网失败只写日志，不影响启动。
 
-更新流程：校验 tag -> 备份 working（不含用户目录）-> 拉取 tag 树到临时目录
--> 校验 config.py 仍是 KL 品牌 -> 合并用户数据 -> 原地替换 -> 回写 app.json。
-任一步失败都会从备份回滚。
+安全更新：KL 运行中（进程仍在或文件被占用）一律拒绝，未修改任何文件即中止。
+安装采用"先建好新树、再整体换目录"的方式，不再原地删除，避免出现半替换状态。
 """
-
 from __future__ import annotations
 
 import io
@@ -16,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -25,8 +24,12 @@ from pathlib import Path
 
 TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)\.(\d+)$")
 PRESERVE = ("configs", "logs", "screenshots", "cache")
-SKIP_COPY = set(PRESERVE) | {"__pycache__", ".pytest_cache", ".git"}
+SKIP_COPY = set(PRESERVE) | {"__pycache__", ".pytest_cache", ".git", ".kl.pid"}
 logger = None
+
+
+class UpdaterBusyError(RuntimeError):
+    """KL 正在运行或目标文件被占用，更新已中止。"""
 
 
 def log(message: str) -> None:
@@ -50,6 +53,37 @@ def install_root() -> Path:
 
 def app_json_path() -> Path:
     return working_dir().parent / "app.json"
+
+
+def pending_path() -> Path:
+    return install_root() / "build-tools" / "update-pending.json"
+
+
+def pid_path() -> Path:
+    return working_dir() / ".kl.pid"
+
+
+def mark_running() -> None:
+    """启动时写 pid 标记；更新器用它判断 KL 是否在运行（不受权限影响）。"""
+    try:
+        pid_path().write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _pid_alive() -> int:
+    """读 .kl.pid 判断 KL 是否在运行；标记指向自身说明是在 KL 进程内发起更新。"""
+    try:
+        pid = int(pid_path().read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+    if pid <= 0:
+        return 0
+    try:
+        import psutil
+        return pid if psutil.pid_exists(pid) else 0
+    except ImportError:
+        return pid
 
 
 def _repo_parts(url: str) -> tuple[str, str]:
@@ -139,6 +173,116 @@ def check() -> tuple[str, str, bool]:
     return latest, current, parse_tag(latest) > current_version(app)
 
 
+# ---------------------------------------------------------------- 安全检查
+
+def _is_under(path: Path, parent: Path) -> bool:
+    try:
+        return os.path.commonpath(
+            [os.path.normcase(str(path)), os.path.normcase(str(parent))]) == os.path.normcase(str(parent))
+    except ValueError:
+        return False
+
+
+def _running_processes(working: Path, root: Path) -> list[str]:
+    """返回属于本安装的进程描述（运行中则不能替换任何文件）。"""
+    decoy = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "KL" / "runtime" / "kl.exe"
+    hits: list[str] = []
+    try:
+        import psutil
+    except ImportError:
+        return hits
+    for proc in psutil.process_iter(["pid", "exe", "name"]):
+        try:
+            if proc.pid == os.getpid():
+                continue
+            exe = proc.info.get("exe") or ""
+            if not exe:
+                # 高权限进程可能读不到 exe，按名字兜底识别伪装进程
+                if (proc.info.get("name") or "").lower() == "kl.exe":
+                    hits.append(f"kl.exe({proc.pid})")
+                continue
+            path = Path(exe)
+            if path == decoy or _is_under(path, root) or _is_under(path, working):
+                hits.append(f"{proc.info.get('name') or '?'}({proc.pid})")
+        except Exception:  # noqa: BLE001
+            continue
+    return hits
+
+
+def _locked_files(working: Path) -> list[str]:
+    """尝试以写方式打开每个文件；失败说明被占用或只读。"""
+    locked: list[str] = []
+    for path in working.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(working)
+        if rel.parts and rel.parts[0] in SKIP_COPY:
+            continue
+        try:
+            with open(path, "rb+"):
+                pass
+        except PermissionError:
+            locked.append(str(rel))
+        except OSError as error:
+            if getattr(error, "errno", None) in (13, 32):
+                locked.append(str(rel))
+    return locked
+
+
+def preflight(working: Path | None = None, root: Path | None = None) -> None:
+    """更新前检查；不通过时抛 UpdaterBusyError，调用方保证此时尚未改动任何文件。"""
+    working = working or working_dir()
+    root = root or install_root()
+    problems: list[str] = []
+    pid = _pid_alive()
+    if pid:
+        problems.append(f"KL 正在运行（pid {pid}）")
+    procs = _running_processes(working, root)
+    if procs:
+        problems.append("KL 进程：" + "、".join(procs[:3]))
+    locked = _locked_files(working)
+    if locked:
+        head = "、".join(locked[:5])
+        more = f" 等 {len(locked)} 个文件" if len(locked) > 5 else ""
+        problems.append(f"文件被占用：{head}{more}")
+    if problems:
+        raise UpdaterBusyError(
+            "无法安全更新，尚未修改任何文件。请完全退出 KL 后重试。\n" + "\n".join(problems))
+
+
+# ---------------------------------------------------------------- 排队与安装
+
+def write_pending(tag: str) -> None:
+    path = pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"tag": tag, "created": datetime.now().isoformat(timespec="seconds")},
+                               ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def read_pending() -> dict:
+    try:
+        return json.loads(pending_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def clear_pending() -> None:
+    try:
+        pending_path().unlink()
+    except OSError:
+        pass
+
+
+def _append_log(message: str) -> None:
+    try:
+        path = working_dir() / "logs" / "kl-updater.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
+    except OSError:
+        pass
+
+
 def _copy_tree(src: Path, dst: Path, ignore=shutil.ignore_patterns(*SKIP_COPY)) -> None:
     shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
 
@@ -149,15 +293,33 @@ def _backup(working: Path, backup_dir: Path) -> Path:
     return target
 
 
-def _rollback(working: Path, backup_working: Path) -> None:
-    for item in working.iterdir():
-        if item.name in PRESERVE:
+def _swap_tree(tree: Path, working: Path, stamp: str) -> Path:
+    """整体换目录：working -> old，tree -> working，用户目录随后迁移。
+
+    任一步失败都会把 old 换回 working，不会出现"删了一半"的状态。
+    """
+    old = working.with_name(f"{working.name}.old-{stamp}")
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
+    os.rename(working, old)
+    try:
+        os.rename(tree, working)
+    except OSError:
+        os.rename(old, working)
+        raise
+
+    for name in PRESERVE:
+        src = old / name
+        if not src.exists():
             continue
-        if item.is_dir():
-            shutil.rmtree(item)
-        else:
-            item.unlink()
-    _copy_tree(backup_working, working, ignore=None)
+        dst = working / name
+        if dst.exists():
+            shutil.rmtree(dst, ignore_errors=True)
+        try:
+            os.replace(src, dst)
+        except OSError:
+            _copy_tree(src, dst, ignore=None)
+    return old
 
 
 def _extract_tag(url: str, tag: str, dest: Path) -> None:
@@ -188,16 +350,17 @@ def update(tag: str) -> dict:
         raise RuntimeError(f"远端不存在 tag：{tag}")
 
     working = working_dir()
+    # 先做占用检查：不通过就直接抛错，此时一个文件都没动
+    preflight(working)
+
     root = install_root()
     tools = root / "build-tools"
     tools.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_dir = tools / f"backup-kl-update-{stamp}"
 
-    backup_working = _backup(working, backup_dir)
-    log(f"backup -> {backup_dir}")
-
     staging = Path(tempfile.mkdtemp(prefix=f"kl-update-{tag}-", dir=str(tools)))
+    old: Path | None = None
     try:
         _extract_tag(url, tag, staging)
         tree = staging / "tree"
@@ -205,10 +368,18 @@ def update(tag: str) -> dict:
         if "gui_title': 'KL'" not in config_text and "gui_title\": \"KL\"" not in config_text:
             raise RuntimeError("新版本的 config.py 不含 KL 品牌，tag 可能取错，已中止")
 
-        for name in PRESERVE:
-            (tree / name).mkdir(exist_ok=True)
+        # 目标版本必须带安全更新器，否则装上去就等于把修复回退掉
+        target_updater = tree / "src" / "kl_updater.py"
+        target_text = target_updater.read_text(encoding="utf-8", errors="replace") if target_updater.exists() else ""
+        if "def preflight(" not in target_text:
+            raise RuntimeError("新版本的更新器不含安全安装逻辑，已中止安装。请等重新构建的版本。")
 
-        # 保留 tag 树里没有的顶层用户数据
+        # 用户目录以当前安装为准，tag 树里自带的同名目录不采用
+        for name in PRESERVE:
+            if (tree / name).exists():
+                shutil.rmtree(tree / name, ignore_errors=True)
+
+        # 保留 tag 树里没有的顶层用户文件
         for item in working.iterdir():
             if item.name in SKIP_COPY or (tree / item.name).exists():
                 continue
@@ -217,8 +388,11 @@ def update(tag: str) -> dict:
             else:
                 shutil.copy2(item, tree / item.name)
 
-        _rollback(working, backup_working)
-        _copy_tree(tree, working)
+        _backup(working, backup_dir)
+        log(f"backup -> {backup_dir}")
+
+        old = _swap_tree(tree, working, stamp)
+        log(f"tree swapped, previous -> {old}")
 
         app["current_version"] = tag
         versions = list(app.get("available_versions") or [])
@@ -229,20 +403,46 @@ def update(tag: str) -> dict:
         tmp.write_text(json.dumps(app, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, app_json_path())
         log(f"updated to {tag}")
-        return {"updated": True, "tag": tag, "backup": str(backup_dir)}
     except Exception:
-        log("更新失败，开始回滚")
-        _rollback(working, backup_working)
+        if old is not None and old.exists():
+            failed = working.with_name(f"{working.name}.failed-{stamp}")
+            try:
+                os.rename(working, failed)
+                os.rename(old, working)
+                shutil.rmtree(failed, ignore_errors=True)
+                log("已从 .old 目录还原")
+            except OSError as error:
+                log(f"还原失败，备份保留在 {backup_dir}：{error}")
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+    if old is not None:
+        shutil.rmtree(old, ignore_errors=True)
+    return {"updated": True, "tag": tag, "backup": str(backup_dir)}
+
+
+def auto_apply() -> dict:
+    """启动前执行：有排队版本就安装；失败只记日志，不影响启动。"""
+    pending = read_pending()
+    tag = str(pending.get("tag") or "")
+    if not tag:
+        return {"applied": False, "reason": "no-pending"}
+    try:
+        result = update(tag)
+        clear_pending()
+        _append_log(f"auto update {tag} ok, backup={result['backup']}")
+        return {"applied": True, **result}
+    except Exception as error:  # noqa: BLE001
+        _append_log(f"auto update {tag} failed: {error}")
+        return {"applied": False, "reason": str(error)}
 
 
 _bridge = None
 
 
 def start_background_check() -> None:
-    """启动后台检查；有 Qt 就弹对话框，否则只写日志。"""
+    """启动后台检查；发现新版本只排队，退出 KL 后由启动脚本安装。"""
     global _bridge
     try:
         from PySide6.QtCore import QObject, Signal
@@ -259,23 +459,24 @@ def start_background_check() -> None:
     def on_found(latest: str, current: str) -> None:
         answer = QMessageBox.question(
             None, "KL 更新",
-            f"发现新版本 {latest}（当前 {current}）。\n\n是否现在更新？更新完成后需要重启 KL。")
+            f"发现新版本 {latest}（当前 {current}）。\n\n"
+            "KL 运行中无法替换自身文件。是否安排到下次启动时自动安装？")
         if answer != QMessageBox.Yes:
             return
         try:
-            result = update(latest)
+            write_pending(latest)
             QMessageBox.information(
                 None, "KL 更新",
-                f"已更新到 {result['tag']}，请重启 KL。\n备份：{result['backup']}")
+                f"已安排 {latest}。\n请退出 KL，下次启动时会自动完成安装。")
         except Exception as error:  # noqa: BLE001
-            QMessageBox.critical(None, "KL 更新失败", str(error))
+            QMessageBox.warning(None, "KL 更新", f"安排失败：{error}")
 
     _bridge.found.connect(on_found)
 
     def worker() -> None:
         try:
             latest, current, needs = check()
-            if needs:
+            if needs and not read_pending():
                 _bridge.found.emit(latest, current)
         except Exception as error:  # noqa: BLE001
             log(f"检查失败：{error}")
@@ -297,11 +498,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--update", metavar="TAG")
+    parser.add_argument("--auto", action="store_true")
     parser.add_argument("--root", help="覆盖安装根目录（测试用）")
     args = parser.parse_args()
     if args.root:
         os.environ["KL_UPDATER_INSTALL_ROOT"] = args.root
-
+    if args.auto:
+        print(json.dumps(auto_apply(), ensure_ascii=False))
+        return 0
     if args.update:
         print(json.dumps(update(args.update), ensure_ascii=False))
         return 0
