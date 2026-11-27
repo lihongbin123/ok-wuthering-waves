@@ -1,0 +1,24 @@
+name: "kl"
+uac: true
+icon: "icons/icon.png"
+website: "https://kl.invalid/launcher"
+keep_releases: 30
+
+profiles:
+  - name: "China"
+    git_url: "https://git.kl.invalid/upd/main.git"
+    admin: true
+    main_script: "main.py"
+    requires_python: "3.12"
+    requirements: "requirements.txt"
+    use_pythonw: true
+    pip_args: "--no-deps"
+    show_add_defender: true
+    # PYTHONPATH: "your/default/path" # Optional, will be "" if missing
+
+  - name: "Global"
+    git_url: "https://git.kl.invalid/upd-global/main.git"
+    main_script: "main.py"
+    requirements: "requirements.txt"
+
+
