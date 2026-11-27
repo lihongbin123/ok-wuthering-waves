@@ -94,6 +94,7 @@ class UpdateCard(QWidget):
     check_started = Signal()
     _versions_loaded = Signal(object)
     _update_finished = Signal(object)
+    _notes_ready = Signal(object)
     VERSION_COMBO_MIN_WIDTH = 120
     VERSION_COMBO_MAX_WIDTH = 240
 
@@ -110,6 +111,7 @@ class UpdateCard(QWidget):
         self.versions = []
         self._busy = False
         self._automatic_check = False
+        self._pending_tag = ""
         logger.info(
             f"initialized current_version={self.current_version!r}, "
             f"pyappify_module={getattr(pyappify_module, '__file__', type(pyappify_module).__name__)!r}, "
@@ -171,6 +173,7 @@ class UpdateCard(QWidget):
 
         self._versions_loaded.connect(self._apply_versions)
         self._update_finished.connect(self._apply_update_result)
+        self._notes_ready.connect(self._tag_notes_ready)
 
     def check_for_updates(self, automatic=False):
         """Load the version list; ``automatic`` checks announce a newer version."""
@@ -244,14 +247,41 @@ class UpdateCard(QWidget):
         if not _is_numeric_version(tag) or tag.count(".") != 3:
             self._show_error(self.tr("请填写四段式版本号，例如 v3.8.15.6。"))
             return
-        if self._compare_versions(tag, str(self.current_version)) < 0:
-            answer = QMessageBox.question(
-                self, self.tr("降级确认"),
-                self.tr("将安装旧版本 {tag}（当前 {current}），继续？").format(
-                    tag=tag, current=self.current_version),
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        self._pending_tag = tag
+        self._set_busy(True)
+        self._set_status(self.tr("正在获取 {tag} 的更新说明…").format(tag=tag))
+        from src import kl_updater
+
+        self._run_in_background(
+            lambda: kl_updater.release_notes(str(self.current_version), tag),
+            self._notes_ready,
+            f"kl_updater.release_notes({tag!r})",
+        )
+
+    def _tag_notes_ready(self, result):
+        """说明取回后在 UI 线程确认；升级和降级都先展示会带来什么。"""
+        successful, value = result
+        notes = value if successful else ""
+        tag = self._pending_tag
+        if not tag:
+            return
+        self._set_busy(False, refresh_selection=False)
+        current = str(self.current_version)
+        if self._compare_versions(tag, current) < 0:
+            header = self.tr("将降级到旧版本 {tag}（当前 {current}）。").format(tag=tag, current=current)
+        else:
+            header = self.tr("将安装 {tag}（当前 {current}）。").format(tag=tag, current=current)
+        answer = QMessageBox.question(
+            self, self.tr("更新确认"), header + (f"\n\n{notes}" if notes else ""),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            self._set_status(self.tr("已取消。"))
+            return
+        update_to_version = getattr(self.pyappify_module, "update_to_version", None)
+        if not callable(update_to_version):
+            self._show_error(self.tr("当前更新组件不支持指定版本安装。"))
+            return
         self._set_busy(True)
         self._set_status(self.tr("正在安装 {tag}…").format(tag=tag))
         self._run_in_background(
