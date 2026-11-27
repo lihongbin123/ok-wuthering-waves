@@ -250,6 +250,101 @@ def preflight(working: Path | None = None, root: Path | None = None) -> None:
             "无法安全更新，尚未修改任何文件。请完全退出 KL 后重试。\n" + "\n".join(problems))
 
 
+# ---------------------------------------------------------------- 更新说明
+
+CHANGELOG_FILES = ("CHANGELOG.zh-CN.md", "CHANGELOG.zh-TW.md", "CHANGELOG.md")
+BUILD_INFO_NAME = "kl-build-info.json"
+_HEADING_RE = re.compile(r"^##\s+v?(\d+)\.(\d+)\.(\d+)\s*(.*)$")
+
+
+def _raw_url(tag: str, name: str) -> str:
+    owner, repo = _repo_parts(git_url(read_app_json()))
+    return f"https://raw.githubusercontent.com/{owner}/{repo}/{tag}/{name}"
+
+
+def _fetch_text(url: str) -> str:
+    with _open(url, timeout=30) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def parse_changelog(text: str) -> list[dict]:
+    """把 CHANGELOG 拆成 [{version, title, lines}]，忽略无版本标题的内容。"""
+    sections: list[dict] = []
+    current = None
+    for line in text.splitlines():
+        match = _HEADING_RE.match(line)
+        if match:
+            current = {
+                "version": tuple(int(x) for x in match.group(1, 2, 3)),
+                "title": line.lstrip("# ").strip(),
+                "lines": [],
+            }
+            sections.append(current)
+        elif current is not None and line.strip():
+            current["lines"].append(line.strip())
+    return sections
+
+
+def _base_tuple(version: str) -> tuple[int, int, int]:
+    numbers = [int(x) for x in re.findall(r"\d+", str(version))[:3]]
+    return tuple(numbers + [0] * (3 - len(numbers)))
+
+
+def _format_sections(sections, current: str, target: str,
+                     max_versions: int = 3, max_lines: int = 10) -> list[str]:
+    """当前基线之后、目标基线之内的 CHANGELOG 段落（新的在前）。"""
+    current_base, target_base = _base_tuple(current), _base_tuple(target)
+    picked = [s for s in sections if current_base < s["version"] <= target_base]
+    picked.sort(key=lambda s: s["version"], reverse=True)
+    out: list[str] = []
+    used = 0
+    for section in picked[:max_versions]:
+        out.append(section["title"])
+        for line in section["lines"]:
+            if used >= max_lines:
+                out.append("…")
+                return out
+            out.append(f"• {line.lstrip('-* ').strip()}")
+            used += 1
+    return out
+
+
+def overlay_summary(target: str) -> str:
+    """从构建时自动生成的 kl-build-info.json 读 KL 增量摘要。"""
+    try:
+        info = json.loads(_fetch_text(_raw_url(target, BUILD_INFO_NAME)))
+    except Exception:  # noqa: BLE001
+        return "KL 增量：该版本未附带增量清单"
+    files = info.get("overlay_files") or []
+    subject = str(info.get("overlay_subject") or "").strip()
+    text = f"KL 增量（{len(files)} 个文件）"
+    if subject:
+        text += f"：{subject}"
+    return text
+
+
+def release_notes(current: str, target: str) -> str:
+    """这次升级带来什么：当前版本到目标 tag 的上游说明 + KL 增量摘要。"""
+    blocks: list[str] = []
+    current_base, target_base = _base_tuple(current), _base_tuple(target)
+    if current_base >= target_base:
+        blocks.append(f"上游更新：同一上游基线（v{'.'.join(map(str, target_base))}），无上游内容变化。")
+    else:
+        header = f"上游更新（v{'.'.join(map(str, current_base))} → v{'.'.join(map(str, target_base))}）："
+        text = ""
+        for name in CHANGELOG_FILES:
+            try:
+                text = _fetch_text(_raw_url(target, name))
+            except Exception:  # noqa: BLE001
+                text = ""
+            if text.strip():
+                break
+        body = _format_sections(parse_changelog(text), current, target) if text else []
+        blocks.append(header + ("\n" + "\n".join(body) if body else "\n（未取到该区间的更新说明）"))
+    blocks.append(overlay_summary(target))
+    return "\n\n".join(blocks)
+
+
 # ---------------------------------------------------------------- 排队与安装
 
 def write_pending(tag: str) -> None:
@@ -452,16 +547,20 @@ def start_background_check() -> None:
         return
 
     class _Bridge(QObject):
-        found = Signal(str, str)
+        found = Signal(str, str, str)
 
     _bridge = _Bridge()
 
-    def on_found(latest: str, current: str) -> None:
+    def on_found(latest: str, current: str, notes: str) -> None:
+        text = f"发现新版本 {latest}（当前 {current}）。"
+        if notes:
+            text += f"\n\n{notes}"
+        text += "\n\nKL 运行中无法替换自身文件。是否安排到下次启动时自动安装？"
         answer = QMessageBox.question(
-            None, "KL 更新",
-            f"发现新版本 {latest}（当前 {current}）。\n\n"
-            "KL 运行中无法替换自身文件。是否安排到下次启动时自动安装？")
-        if answer != QMessageBox.Yes:
+            None, "KL 更新", text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
             return
         try:
             write_pending(latest)
@@ -477,7 +576,12 @@ def start_background_check() -> None:
         try:
             latest, current, needs = check()
             if needs and not read_pending():
-                _bridge.found.emit(latest, current)
+                try:
+                    notes = release_notes(current, latest)
+                except Exception as error:  # noqa: BLE001
+                    log(f"更新说明获取失败：{error}")
+                    notes = ""
+                _bridge.found.emit(latest, current, notes)
         except Exception as error:  # noqa: BLE001
             log(f"检查失败：{error}")
 
@@ -498,11 +602,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--update", metavar="TAG")
+    parser.add_argument("--notes", metavar="TAG", help="打印当前版本到 TAG 的更新说明")
     parser.add_argument("--auto", action="store_true")
     parser.add_argument("--root", help="覆盖安装根目录（测试用）")
     args = parser.parse_args()
     if args.root:
         os.environ["KL_UPDATER_INSTALL_ROOT"] = args.root
+    if args.notes:
+        print(release_notes(str(read_app_json().get("current_version") or ""), args.notes))
+        return 0
     if args.auto:
         print(json.dumps(auto_apply(), ensure_ascii=False))
         return 0

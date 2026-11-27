@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -419,6 +420,25 @@ def main() -> int:
     if not (out / "main.py").exists():
         (out / "main.py").write_text(MAIN_PY, "utf-8")
     (out / "main_debug.py").write_text(MAIN_DEBUG_PY, "utf-8")
+
+    # 自动生成增量清单，供更新器在不下载整包的情况下展示“这次改了什么”
+    try:
+        commit = run(["git", "-C", repo, "rev-parse", "--short", "HEAD"]).stdout.strip()
+        subject = run(["git", "-C", repo, "log", "-1", "--format=%s"]).stdout.strip()
+    except Exception:  # noqa: BLE001
+        commit = subject = ""
+    changes = sorted(
+        p.relative_to(overlay).as_posix()
+        for p in overlay.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix not in {".pyc", ".pyo"}
+    )
+    (out / "kl-build-info.json").write_text(json.dumps({
+        "base_tag": args.tag,
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "overlay_commit": commit,
+        "overlay_subject": subject,
+        "overlay_files": changes,
+    }, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
         "tag": args.tag,
