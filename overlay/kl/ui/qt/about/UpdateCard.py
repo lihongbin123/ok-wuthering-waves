@@ -228,24 +228,51 @@ class UpdateCard(QWidget):
             f"pyappify.update_to_version({version!r})",
         )
 
+    def _installable_versions(self):
+        """可安装版本：优先读 app.json 的 available_versions，失败时退回已加载列表。"""
+        try:
+            import json
+
+            from src import kl_updater
+
+            data = json.loads(kl_updater.app_json_path().read_text(encoding="utf-8"))
+            versions = [str(item) for item in (data.get("available_versions") or [])
+                        if kl_updater.TAG_RE.match(str(item))]
+            if versions:
+                versions.sort(
+                    key=lambda v: [int(part) for part in v.lstrip("v").split(".")],
+                    reverse=True,
+                )
+                return versions
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"load installable versions failed: {error}")
+        return [str(item["version"]) for item in self.versions
+                if _is_numeric_version(str(item["version"])) and str(item["version"]).count(".") == 3]
+
     def install_specified_tag(self):
-        """安装用户手工指定的 tag，允许降级；仅显式输入时触发。"""
+        """安装指定版本：从版本列表直接选，允许降级。"""
         if self._busy:
             return
         update_to_version = getattr(self.pyappify_module, "update_to_version", None)
         if not callable(update_to_version):
             self._show_error(self.tr("当前更新组件不支持指定版本安装。"))
             return
-        tag, accepted = QInputDialog.getText(
+        versions = self._installable_versions()
+        if not versions:
+            self._show_error(self.tr("没有可安装的版本列表。"))
+            return
+        current = str(self.current_version)
+        index = versions.index(current) if current in versions else 0
+        tag, accepted = QInputDialog.getItem(
             self, self.tr("安装指定版本"),
-            self.tr("输入四段式 tag（如 v3.8.15.6），可回退到旧版本："),
-            text=self.current_version,
+            self.tr("选择要安装的版本（可回退到旧版本）："),
+            versions, index, False,
         )
-        if not accepted:
+        if not accepted or not tag:
             return
         tag = tag.strip()
         if not _is_numeric_version(tag) or tag.count(".") != 3:
-            self._show_error(self.tr("请填写四段式版本号，例如 v3.8.15.6。"))
+            self._show_error(self.tr("请选择四段式版本，例如 v3.8.15.6。"))
             return
         self._pending_tag = tag
         self._set_busy(True)
