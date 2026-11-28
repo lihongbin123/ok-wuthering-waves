@@ -29,6 +29,22 @@ def install() -> None:
     original = current
 
     def get_version_list(number_versions=10, release_only=True, timeout=120, exit_event=None):
+        # 版本列表以 launcher 的 app.json 为准：本地 repo 缓存只有 v3.8.15 一个 tag，
+        # 直接列 tag 会把“当前版本”显示成 v3.8.15。
+        try:
+            import json
+
+            data = json.loads(kl_updater.app_json_path().read_text(encoding="utf-8"))
+            versions = [str(item) for item in (data.get("available_versions") or [])
+                        if kl_updater.TAG_RE.match(str(item))]
+            if versions:
+                versions.sort(
+                    key=lambda v: [int(part) for part in v.lstrip("v").split(".")],
+                    reverse=True,
+                )
+                return [{"version": item, "kind": "tag"} for item in versions]
+        except Exception as error:  # noqa: BLE001
+            logger.warning("app.json 版本读取失败（%s），改用本地 tag", error)
         try:
             path = standalone.find_repo_path()
             return standalone.list_versions(path, number_versions, release_only, (), None)
